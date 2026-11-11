@@ -55,7 +55,7 @@ Exit codes:
 | `--flatline <n>` | `8` | Flag this many consecutive identical non-zero readings (stuck register). |
 | `--zero-run <n>` | `48` | Flag this many consecutive zero readings. |
 | `--allow-negative` | off | Allow negative kWh for export or bidirectional meters. |
-| `--from <timestamp>` | first reading | Inclusive start of the expected period. ISO 8601 with an explicit offset, on an interval boundary. |
+| `--from <timestamp>` | first reading | Inclusive start of the expected period. ISO 8601 with an explicit offset, on an interval boundary. If this is after a meter's last reading and `--to` is omitted, that meter gets a `time.window` warning. |
 | `--to <timestamp>` | last reading | Inclusive end of the expected period. Same timestamp rules as `--from`. |
 | `--json` | off | Print the JSON report instead of text. |
 | `--help` | | Show help. |
@@ -65,7 +65,9 @@ Exit codes:
 
 The header row must include `meter_id`, `timestamp`, and `kwh`. Names are case-sensitive. Extra columns are ignored. An optional `quality` column is copied onto any finding that comes only from rows sharing that value.
 
-`timestamp` is the interval **end**, in ISO 8601 with an explicit offset (`Z`, `±HH:MM`, or `±HHMM`). Alignment is computed in UTC: the epoch minute of the instant must be divisible by the interval. A `+08:00` timestamp such as `2024-01-01T00:30:00+08:00` is the instant `2023-12-31T16:30:00Z`.
+`timestamp` is the interval **end**, in ISO 8601 with an explicit offset (`Z`, `±HH:MM`, or `±HHMM`). Alignment is computed in UTC: the epoch minute of the instant must be divisible by the interval. A `+08:00` timestamp such as `2024-01-01T00:30:00+08:00` is the instant `2023-12-31T16:30:00Z`. The same forms are accepted for readings and for `--from` / `--to`.
+
+Hour `24` is accepted only as `24:00:00` with the minutes, seconds, and any fraction all zero (seconds may be omitted). That instant is midnight at the end of the given calendar day, equal to the next day's `00:00:00` with the same offset. `2024-01-31T24:00:00Z` is `2024-02-01T00:00:00Z`, and `2024-12-31T24:00:00+08:00` is `2025-01-01T00:00:00+08:00`. `24:00:01`, `24:01:00`, `24:00:00.001`, and `25:00:00` are rejected.
 
 `kwh` is the energy in that interval. Identical values are compared with the parsed numbers, so `1`, `1.0`, and `1.00` are the same reading. Displayed kWh and kW are rounded to 3 decimal places.
 
@@ -82,12 +84,15 @@ Quoted CSV fields, escaped quotes (`""`), CRLF, a leading UTF-8 BOM, and blank l
 | `time.duplicate` | warning if the kWh matches, error if it conflicts | The same meter and instant appear more than once. |
 | `time.order` | warning | A row is earlier than the previous parsed row for that meter. |
 | `time.gap` | error | One or more interval-end slots are missing. One finding per contiguous hole, with `start`, `end`, and `count`. |
+| `time.window` | warning | `--from` is after this meter's last parsed reading and `--to` is omitted, so no interval window is checked. `rows` is empty. |
 | `value.negative` | error | kWh is negative. Suppressed by `--allow-negative`. |
 | `value.spike` | warning | kWh is greater than `spike-factor` times the median of that meter's positive readings. Requires at least 10 positive readings. |
 | `value.zero-run` | warning | At least `zero-run` consecutive zero readings. |
 | `value.flatline` | warning | At least `flatline` consecutive identical non-zero readings. |
 
 The expected slots run from the meter's first parsed timestamp through its last, inclusive. `--from` and `--to` replace those ends when you pass them, so missing intervals at the edges of a billing period are visible. A slot counts as present when any row has that exact instant, even if its kWh is invalid.
+
+When `--from` is after a meter's last parsed reading and `--to` is omitted, that meter has nothing to cover: `expectedIntervals` is 0, `coveragePercent` is null, and the checker emits a `time.window` warning instead of staying silent. `--from` later than `--to` is still a usage error (exit 2). Leading and trailing holes inside a real window, including a window set with both bounds that sits entirely after the readings, stay `time.gap` errors.
 
 ## Summary
 
@@ -156,7 +161,7 @@ Expected intervals 5, missing 1, coverage 80%. Total 9 kWh. Max demand `4 * 60 /
 }
 ```
 
-`rows` is empty for a gap. A row finding lists 1-based file line numbers. `quality` is present only when the referenced rows share a `quality` value.
+`rows` is empty for a gap and for a `time.window` warning. A row finding lists 1-based file line numbers. `quality` is present only when the referenced rows share a `quality` value. `time.order` lists the out-of-order row, and copies that row's `quality` when the row has one.
 
 Library, after `npm run build`:
 

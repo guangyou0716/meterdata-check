@@ -103,14 +103,19 @@ function orderFindings(meterId: string, rows: readonly ParsedRow[]): Finding[] {
   for (const row of rows) {
     if (row.ms === null) continue;
     if (previous !== null && previous.ms !== null && row.ms < previous.ms) {
-      findings.push({
-        rule: 'time.order',
-        severity: 'warning',
-        meterId,
-        rows: [row.line],
-        timestamp: row.rawTimestamp,
-        message: `Timestamp ${row.rawTimestamp} is out of ascending order after row ${previous.line} (${previous.rawTimestamp})`,
-      });
+      findings.push(
+        withQuality(
+          {
+            rule: 'time.order',
+            severity: 'warning',
+            meterId,
+            rows: [row.line],
+            timestamp: row.rawTimestamp,
+            message: `Timestamp ${row.rawTimestamp} is out of ascending order after row ${previous.line} (${previous.rawTimestamp})`,
+          },
+          sharedQuality([row]),
+        ),
+      );
     }
     previous = row;
   }
@@ -149,6 +154,38 @@ function duplicateFindings(meterId: string, rows: readonly ParsedRow[]): Finding
     );
   }
   return findings;
+}
+
+/**
+ * `--from` past the latest parsed reading, with `--to` omitted, is not a gap:
+ * the open end collapses onto that reading and the window is empty.
+ * Both bounds still use `time.gap`, including a window that sits entirely after the data.
+ */
+function fromAfterLastFindings(
+  meterId: string,
+  rows: readonly ParsedRow[],
+  options: ResolvedOptions,
+): Finding[] {
+  const fromMs = options.fromMs;
+  const fromRaw = options.fromRaw;
+  if (fromMs === null || fromRaw === null || options.toMs !== null) return [];
+  let lastMs: number | null = null;
+  for (const row of rows) {
+    if (row.ms === null) continue;
+    if (lastMs === null || row.ms > lastMs) lastMs = row.ms;
+  }
+  if (lastMs === null || fromMs <= lastMs) return [];
+  const lastText = formatUtc(lastMs);
+  return [
+    {
+      rule: 'time.window',
+      severity: 'warning',
+      meterId,
+      rows: [],
+      timestamp: formatUtc(fromMs),
+      message: `--from ${fromRaw} is after this meter's last reading ${lastText}; no rows are in the window`,
+    },
+  ];
 }
 
 function gapFindings(meterId: string, rows: readonly ParsedRow[], options: ResolvedOptions): Finding[] {
@@ -262,6 +299,7 @@ export function collectFindings(rows: readonly ParsedRow[], options: ResolvedOpt
       ...orderFindings(meterId, meterRows),
       ...duplicateFindings(meterId, meterRows),
       ...gapFindings(meterId, meterRows, options),
+      ...fromAfterLastFindings(meterId, meterRows, options),
       ...spikeFindings(meterId, points, options),
       ...runFindings(meterId, points, options),
     );
