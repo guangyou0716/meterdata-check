@@ -80,6 +80,17 @@ describe('run', () => {
     expect(factor.err).toContain('--spike-factor');
   });
 
+  it('warns when --from is after the data and rejects reversed bounds', () => {
+    const late = fakeIo({}, 'meter_id,timestamp,kwh\nM,2024-06-01T00:30:00Z,1\n');
+    expect(run(['--from', '2024-06-01T01:00:00Z', '-'], late.io)).toBe(0);
+    expect(late.out).toContain('time.window');
+    expect(late.out).toContain('0 errors, 1 warning');
+
+    const reversed = fakeIo({}, 'meter_id,timestamp,kwh\nM,2024-06-01T00:30:00Z,1\n');
+    expect(run(['--from', '2024-06-01T02:00:00Z', '--to', '2024-06-01T01:00:00Z', '-'], reversed.io)).toBe(2);
+    expect(reversed.err).toContain('--from is after --to');
+  });
+
   it('exits 0 for warnings only and 1 when an error is present', () => {
     const warning = fakeIo(
       {},

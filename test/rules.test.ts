@@ -148,6 +148,34 @@ describe('time.order', () => {
     expect(ascending).not.toContain('time.order');
     expect(equal).not.toContain('time.order');
   });
+
+  it('copies quality from the out-of-order row when that row has one', () => {
+    const header = 'meter_id,timestamp,kwh,quality';
+    const shared = check(
+      meterCsv(
+        ['A,2024-06-01T01:00:00Z,1,AAA', 'B,2024-06-01T01:00:00Z,1,BBB', 'A,2024-06-01T00:30:00Z,1,AAA'],
+        header,
+      ),
+    );
+    expect(shared.findings.filter((finding) => finding.rule === 'time.order')).toEqual([
+      expect.objectContaining({
+        meterId: 'A',
+        severity: 'warning',
+        rows: [4],
+        quality: 'AAA',
+      }),
+    ]);
+
+    const differs = check(
+      meterCsv(['M,2024-06-01T01:00:00Z,1,EARLY', 'M,2024-06-01T00:30:00Z,1,LATE'], header),
+    );
+    expect(differs.findings.find((finding) => finding.rule === 'time.order')?.quality).toBe('LATE');
+
+    const blank = check(
+      meterCsv(['M,2024-06-01T01:00:00Z,1,EARLY', 'M,2024-06-01T00:30:00Z,1,'], header),
+    );
+    expect(blank.findings.find((finding) => finding.rule === 'time.order')?.quality).toBeUndefined();
+  });
 });
 
 describe('time.gap', () => {
@@ -224,6 +252,127 @@ describe('time.gap', () => {
     const gaps = result.findings.filter((finding) => finding.rule === 'time.gap');
     expect(gaps).toHaveLength(1);
     expect(gaps[0]?.meterId).toBe('B');
+  });
+});
+
+describe('time.window', () => {
+  it('warns when --from is after the last reading and --to is omitted', () => {
+    const result = check(meterCsv(['M,2024-06-01T00:30:00Z,1', 'M,2024-06-01T01:00:00Z,2']), {
+      from: '2024-06-01T01:30:00Z',
+    });
+    expect(result.findings).toEqual([
+      {
+        rule: 'time.window',
+        severity: 'warning',
+        meterId: 'M',
+        rows: [],
+        timestamp: '2024-06-01T01:30:00.000Z',
+        message:
+          "--from 2024-06-01T01:30:00Z is after this meter's last reading 2024-06-01T01:00:00.000Z; no rows are in the window",
+      },
+    ]);
+    expect(result.meters[0]).toMatchObject({
+      rows: 2,
+      expectedIntervals: 0,
+      missingIntervals: 0,
+      coveragePercent: null,
+      totalKwh: 3,
+    });
+    expect(result.counts).toEqual({ errors: 0, warnings: 1 });
+  });
+
+  it('uses the latest parsed instant, not the last row in the file', () => {
+    const inside = check(
+      meterCsv(['M,2024-06-01T02:00:00Z,1', 'M,2024-06-01T00:30:00Z,1']),
+      { from: '2024-06-01T01:00:00Z' },
+    );
+    expect(inside.findings.map((finding) => finding.rule)).toEqual(['time.order', 'time.gap']);
+    expect(inside.meters[0]).toMatchObject({ expectedIntervals: 3, missingIntervals: 2, coveragePercent: 100 / 3 });
+
+    const after = check(
+      meterCsv(['M,2024-06-01T01:00:00Z,1', 'M,2024-06-01T00:30:00Z,1']),
+      { from: '2024-06-01T01:30:00Z' },
+    );
+    expect(after.findings.map((finding) => finding.rule)).toEqual(['time.order', 'time.window']);
+    expect(after.meters[0]).toMatchObject({ expectedIntervals: 0, coveragePercent: null });
+  });
+
+  it('does not attach quality, because the finding has no source rows', () => {
+    const result = check(
+      meterCsv(['M,2024-06-01T00:30:00Z,1,EST'], 'meter_id,timestamp,kwh,quality'),
+      { from: '2024-06-01T01:00:00Z' },
+    );
+    const finding = result.findings.find((item) => item.rule === 'time.window');
+    expect(finding?.rows).toEqual([]);
+    expect(finding?.quality).toBeUndefined();
+  });
+
+  it('warns only for the meter whose last reading is before --from', () => {
+    const result = check(
+      meterCsv([
+        'A,2024-06-01T00:30:00Z,1',
+        'A,2024-06-01T01:00:00Z,1',
+        'B,2024-06-01T02:00:00Z,1',
+        'B,2024-06-01T02:30:00Z,1',
+      ]),
+      { from: '2024-06-01T01:30:00Z' },
+    );
+    const windows = result.findings.filter((finding) => finding.rule === 'time.window');
+    const gaps = result.findings.filter((finding) => finding.rule === 'time.gap');
+    expect(windows.map((finding) => finding.meterId)).toEqual(['A']);
+    expect(gaps.map((finding) => finding.meterId)).toEqual(['B']);
+    expect(gaps[0]).toMatchObject({ count: 1, start: '2024-06-01T01:30:00.000Z' });
+    expect(result.meters[0]).toMatchObject({ meterId: 'A', expectedIntervals: 0, coveragePercent: null });
+    expect(result.meters[1]).toMatchObject({
+      meterId: 'B',
+      expectedIntervals: 3,
+      missingIntervals: 1,
+      coveragePercent: 200 / 3,
+    });
+  });
+
+  it('keeps leading and trailing gaps, and a fully later window when both bounds are set', () => {
+    const csv = meterCsv(['M,2024-06-01T01:00:00Z,1', 'M,2024-06-01T01:30:00Z,1']);
+    const leading = check(csv, { from: '2024-06-01T00:30:00Z' });
+    expect(leading.findings.filter((finding) => finding.rule === 'time.window')).toEqual([]);
+    expect(leading.findings.filter((finding) => finding.rule === 'time.gap')).toMatchObject([
+      { count: 1, start: '2024-06-01T00:30:00.000Z' },
+    ]);
+    expect(leading.meters[0]).toMatchObject({ expectedIntervals: 3, missingIntervals: 1 });
+
+    const trailing = check(csv, { to: '2024-06-01T02:00:00Z' });
+    expect(trailing.findings.filter((finding) => finding.rule === 'time.window')).toEqual([]);
+    expect(trailing.findings.filter((finding) => finding.rule === 'time.gap')).toMatchObject([
+      { count: 1, start: '2024-06-01T02:00:00.000Z' },
+    ]);
+
+    const later = check(csv, { from: '2024-06-01T02:00:00Z', to: '2024-06-01T03:00:00Z' });
+    expect(later.findings.filter((finding) => finding.rule === 'time.window')).toEqual([]);
+    expect(later.findings.filter((finding) => finding.rule === 'time.gap')).toMatchObject([
+      { count: 3, start: '2024-06-01T02:00:00.000Z', end: '2024-06-01T03:00:00.000Z' },
+    ]);
+    expect(later.meters[0]).toMatchObject({ expectedIntervals: 3, missingIntervals: 3, coveragePercent: 0 });
+  });
+
+  it('does not warn when --from equals the last reading, or when nothing parsed', () => {
+    const exact = check(meterCsv(['M,2024-06-01T01:00:00Z,1']), { from: '2024-06-01T01:00:00Z' });
+    expect(exact.findings).toEqual([]);
+    expect(exact.meters[0]).toMatchObject({ expectedIntervals: 1, missingIntervals: 0, coveragePercent: 100 });
+
+    const unparsed = check(meterCsv(['M,not-a-time,1']), { from: '2024-06-01T00:30:00Z' });
+    expect(unparsed.findings.map((finding) => finding.rule)).toEqual(['structure.timestamp']);
+    expect(unparsed.meters[0]).toMatchObject({ expectedIntervals: 0, coveragePercent: null });
+  });
+
+  it('leaves --to before the first reading unchanged, and still rejects reversed bounds', () => {
+    const early = check(meterCsv(['M,2024-06-01T01:00:00Z,1']), { to: '2024-06-01T00:30:00Z' });
+    expect(early.findings.filter((finding) => finding.rule === 'time.window')).toEqual([]);
+    expect(early.findings.filter((finding) => finding.rule === 'time.gap')).toEqual([]);
+    expect(early.meters[0]).toMatchObject({ expectedIntervals: 0, coveragePercent: null });
+
+    expect(() =>
+      check(meterCsv(series(1, 1)), { from: '2024-06-01T02:00:00Z', to: '2024-06-01T01:00:00Z' }),
+    ).toThrow(/--from is after --to/);
   });
 });
 

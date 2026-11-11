@@ -14,6 +14,8 @@ function daysInMonth(year: number, month: number): number {
  * Parse an ISO 8601 timestamp that carries an explicit offset (`Z` or `±HH:MM` / `±HHMM`).
  * Returns UTC epoch milliseconds, or null when the text is not a real timestamp with an offset.
  * Fractional seconds are kept so a non-zero fraction fails interval alignment.
+ * `24:00:00` with minutes, seconds, and fraction all zero is midnight at the end of that day:
+ * the same instant as the next day's `00:00:00` with the same offset. Any other hour 24 is rejected.
  */
 export function parseTimestamp(raw: string): number | null {
   const match = TIMESTAMP_RE.exec(raw.trim());
@@ -37,17 +39,27 @@ export function parseTimestamp(raw: string): number | null {
   const year = Number(yearText);
   const month = Number(monthText);
   const day = Number(dayText);
-  const hour = Number(hourText);
+  let hour = Number(hourText);
   const minute = Number(minuteText);
   const second = match[6] === undefined ? 0 : Number(match[6]);
   if (month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month)) return null;
-  if (hour > 23 || minute > 59 || second > 59) return null;
+  if (minute > 59 || second > 59) return null;
 
   let extraMs = 0;
   const frac = match[7];
   if (frac !== undefined) {
     extraMs = Math.round(Number(`0${frac}`) * 1000);
     if (extraMs === 0 && /[1-9]/.test(frac)) extraMs = 1;
+  }
+
+  // 24:00:00 is the only legal use of hour 24. Date.UTC rolls the extra day into the next month and year.
+  let utcDay = day;
+  if (hour === 24) {
+    if (minute !== 0 || second !== 0 || extraMs !== 0) return null;
+    hour = 0;
+    utcDay += 1;
+  } else if (hour > 23) {
+    return null;
   }
 
   let offsetMinutes = 0;
@@ -60,7 +72,7 @@ export function parseTimestamp(raw: string): number | null {
     offsetMinutes = sign * (offsetHour * 60 + offsetMinute);
   }
 
-  return Date.UTC(year, month - 1, day, hour, minute, second) - offsetMinutes * 60_000 + extraMs;
+  return Date.UTC(year, month - 1, utcDay, hour, minute, second) - offsetMinutes * 60_000 + extraMs;
 }
 
 /** True when `ms` lands on an interval boundary in UTC epoch minutes. */

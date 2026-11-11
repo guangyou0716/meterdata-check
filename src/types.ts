@@ -8,12 +8,13 @@ export type RuleId =
   | 'time.duplicate'
   | 'time.order'
   | 'time.gap'
+  | 'time.window'
   | 'value.negative'
   | 'value.spike'
   | 'value.zero-run'
   | 'value.flatline';
 
-/** One data-quality finding. `rows` is empty for gaps, which have no source row. */
+/** One data-quality finding. `rows` is empty when there is no source row (a gap, or an empty window). */
 export interface Finding {
   rule: RuleId;
   severity: Severity;
